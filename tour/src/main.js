@@ -50,7 +50,7 @@ async function transitionTo(position,target){
   setView(position,target);$('scene-fade').classList.remove('active');return true;
 }
 async function visit(place,{instant=false}={}){
-  if(!ready)return;mode='walk';paused=false;tourDone=false;clearInput();locationUI(place);syncUI();
+  if(!ready)return;const stop=checkpoints.find(c=>c.place===place);if(stop)tourTime=stop.t;mode='walk';paused=false;tourDone=false;clearInput();locationUI(place);syncUI();
   const view=places[place];
   if(instant){transitionId++;$('scene-fade').classList.remove('active');setView(view.position,view.target);}
   else await transitionTo(view.position,view.target);
@@ -58,8 +58,12 @@ async function visit(place,{instant=false}={}){
 }
 async function beginTour(){
   if(!ready)return;if(reduced){await visit(mode==='welcome'?'plaza':placeOrder[(placeOrder.indexOf(activePlace)+1)%placeOrder.length]);announce('Camera motion is reduced. Choose a place to continue.');return;}
-  mode='walk';paused=false;tourTime=0;tourDone=false;locationUI('plaza');syncUI();
-  if(!await transitionTo(places.plaza.position,places.plaza.target))return;mode='tour';syncUI();canvas.focus({preventScroll:true});announce('A walk through the model-based campus. Move or drag to take over.');
+  const atEnd=tourDone||tourTime>=route.at(-1).t;if(atEnd)tourTime=0;
+  const resuming=tourTime>0,point=sampleRoute(tourTime);
+  mode='walk';paused=false;tourDone=false;syncUI();
+  if(!await transitionTo([point.x,1.72,point.z],point.look))return;
+  updatePlace();mode='tour';syncUI();canvas.focus({preventScroll:true});
+  announce(resuming?'Resuming the guided visit where you left off.':'A walk through the model-based campus. Move or drag to take over.');
 }
 function takeOver(){if(mode==='tour'){mode='walk';paused=false;syncUI();announce('You’re in control. Explore at your own pace.');}if(paused){paused=false;syncUI();$('visit-status').hidden=true;}}
 function togglePause(){if(mode==='welcome'||!ready)return;paused=!paused;clearInput();syncUI();if(paused)announce('Visit paused. Press Esc or Resume visit to continue.',true);else $('visit-status').hidden=true;}
@@ -135,11 +139,20 @@ const route=[];
 for(const [x,z,look] of [[38,39,[-21,8,-9]],[38,26,[-21,8,-9]],[-20,28,[-25,8,-17]],[-20,20,[-25,8,-17]],[-20,28,[-77,6,0]],[-77,23,[-77,8,0]],[-77,6,[-77,4,-5]],[-77,23,[-120,22,-15]],[38,26,[70,9,0]],[92,26,[107,6,0]],[107,26,[107,6,0]],[107,11,[107,5,-1]],[107,26,[126,1,42]],[90,26,[104,18,-34]],[90,-12,[104,13,-34]]]){
  const prev=route.at(-1);route.push({x,z,look,t:prev?prev.t+Math.hypot(x-prev.x,z-prev.z)/5.5+2:0});
 }
+// The visit resumes from wherever it was interrupted: tourTime is a live progress cursor, so taking over freezes it in place and the button restarts from the same spot on the route.
+function sampleRoute(t){
+  let i=0;while(i<route.length-2&&t>route[i+1].t)i++;
+  const a=route[i],b=route[i+1],u=THREE.MathUtils.smoothstep(t,a.t,b.t);
+  return {x:THREE.MathUtils.lerp(a.x,b.x,u),z:THREE.MathUtils.lerp(a.z,b.z,u),look:tmpLook.fromArray(a.look).lerp(new THREE.Vector3(...b.look),u).toArray()};
+}
+// Authored route stops that sit on a named landmark, so choosing that landmark also moves the resume point there.
+const checkpoints=[];
+for(let i=0;i<route.length;i++){const p=route[i],place=placeOrder.find(id=>Math.hypot(p.x-places[id].position[0],p.z-places[id].position[2])<.01);if(place)checkpoints.push({index:i,place,t:p.t});}
 function guided(dt){
-  tourTime=Math.min(route.at(-1).t,tourTime+dt);let i=0;while(i<route.length-2&&tourTime>route[i+1].t)i++;
-  const a=route[i],b=route[i+1],u=THREE.MathUtils.smoothstep(tourTime,a.t,b.t);
-  camera.position.set(THREE.MathUtils.lerp(a.x,b.x,u),1.72,THREE.MathUtils.lerp(a.z,b.z,u));
-  tmpLook.fromArray(a.look).lerp(new THREE.Vector3(...b.look),u);camera.lookAt(tmpLook);yaw=targetYaw=camera.rotation.y;pitch=targetPitch=camera.rotation.x;
+  tourTime=Math.min(route.at(-1).t,tourTime+dt);
+  const point=sampleRoute(tourTime);
+  camera.position.set(point.x,1.72,point.z);
+  camera.lookAt(...point.look);yaw=targetYaw=camera.rotation.y;pitch=targetPitch=camera.rotation.x;
   if(tourTime>=route.at(-1).t&&!tourDone){tourDone=true;mode='walk';syncUI();announce('You have reached the dormitory arcade. Keep exploring or choose another landmark.',true);}
 }
 function updatePlace(){const p=camera.position;let nearest=activePlace,best=Infinity;for(const [id,s]of Object.entries(places)){const d=Math.hypot(p.x-s.position[0],p.z-s.position[2]);if(d<best){nearest=id;best=d;}}locationUI(nearest);}
