@@ -15,7 +15,7 @@ const places={
 const placeOrder=Object.keys(places);
 let renderer,world,ready=false,mode='welcome',paused=false,shotPaused=false;
 let reduced=matchMedia('(prefers-reduced-motion: reduce)').matches, sensitivity=1,quality='balanced';
-let tourTime=0,tourDone=false,resumeStop=0,elapsed=0,lastTime=performance.now(),activePlace='plaza',transitionId=0;
+let tourTime=0,tourDone=false,elapsed=0,lastTime=performance.now(),activePlace='plaza',transitionId=0;
 let yaw=0,pitch=0,targetYaw=0,targetPitch=0,drag=null,toastTimer;
 const keys=new Set(),touchMove=new Set(),velocity=new THREE.Vector2();
 const scene=new THREE.Scene();
@@ -50,7 +50,7 @@ async function transitionTo(position,target){
   setView(position,target);$('scene-fade').classList.remove('active');return true;
 }
 async function visit(place,{instant=false}={}){
-  if(!ready)return;const stop=checkpoints.findIndex(c=>c.place===place);if(stop>=0)resumeStop=stop;mode='walk';paused=false;tourDone=false;clearInput();locationUI(place);syncUI();
+  if(!ready)return;const stop=checkpoints.find(c=>c.place===place);if(stop)tourTime=stop.t;mode='walk';paused=false;tourDone=false;clearInput();locationUI(place);syncUI();
   const view=places[place];
   if(instant){transitionId++;$('scene-fade').classList.remove('active');setView(view.position,view.target);}
   else await transitionTo(view.position,view.target);
@@ -58,10 +58,12 @@ async function visit(place,{instant=false}={}){
 }
 async function beginTour(){
   if(!ready)return;if(reduced){await visit(mode==='welcome'?'plaza':placeOrder[(placeOrder.indexOf(activePlace)+1)%placeOrder.length]);announce('Camera motion is reduced. Choose a place to continue.');return;}
-  const atEnd=resumeStop>=checkpoints.length-1;if(atEnd)resumeStop=0;const stop=checkpoints[resumeStop];
-  mode='walk';paused=false;tourTime=stop.t;tourDone=false;locationUI(stop.place);syncUI();
-  if(!await transitionTo([route[stop.index].x,1.72,route[stop.index].z],route[stop.index].look))return;mode='tour';syncUI();canvas.focus({preventScroll:true});
-  announce(resumeStop?'Resuming the guided visit from '+placeShort[stop.place]+'.':'A walk through the model-based campus. Move or drag to take over.');
+  const atEnd=tourDone||tourTime>=route.at(-1).t;if(atEnd)tourTime=0;
+  const resuming=tourTime>0,point=sampleRoute(tourTime);
+  mode='walk';paused=false;tourDone=false;syncUI();
+  if(!await transitionTo([point.x,1.72,point.z],point.look))return;
+  updatePlace();mode='tour';syncUI();canvas.focus({preventScroll:true});
+  announce(resuming?'Resuming the guided visit where you left off.':'A walk through the model-based campus. Move or drag to take over.');
 }
 function takeOver(){if(mode==='tour'){mode='walk';paused=false;syncUI();announce('You’re in control. Explore at your own pace.');}if(paused){paused=false;syncUI();$('visit-status').hidden=true;}}
 function togglePause(){if(mode==='welcome'||!ready)return;paused=!paused;clearInput();syncUI();if(paused)announce('Visit paused. Press Esc or Resume visit to continue.',true);else $('visit-status').hidden=true;}
@@ -137,15 +139,20 @@ const route=[];
 for(const [x,z,look] of [[38,39,[-21,8,-9]],[38,26,[-21,8,-9]],[-20,28,[-25,8,-17]],[-20,20,[-25,8,-17]],[-20,28,[-77,6,0]],[-77,23,[-77,8,0]],[-77,6,[-77,4,-5]],[-77,23,[-120,22,-15]],[38,26,[70,9,0]],[92,26,[107,6,0]],[107,26,[107,6,0]],[107,11,[107,5,-1]],[107,26,[126,1,42]],[90,26,[104,18,-34]],[90,-12,[104,13,-34]]]){
  const prev=route.at(-1);route.push({x,z,look,t:prev?prev.t+Math.hypot(x-prev.x,z-prev.z)/5.5+2:0});
 }
-// Checkpoints are the authored route stops that coincide with a named landmark; the guided visit resumes from the last one reached.
-const placeShort={plaza:'the plaza',entrance:'the water court',lobby:'the west block',sports:'the sports hall',residence:'the dormitories',towers:'the towers'};
+// The visit resumes from wherever it was interrupted: tourTime is a live progress cursor, so taking over freezes it in place and the button restarts from the same spot on the route.
+function sampleRoute(t){
+  let i=0;while(i<route.length-2&&t>route[i+1].t)i++;
+  const a=route[i],b=route[i+1],u=THREE.MathUtils.smoothstep(t,a.t,b.t);
+  return {x:THREE.MathUtils.lerp(a.x,b.x,u),z:THREE.MathUtils.lerp(a.z,b.z,u),look:tmpLook.fromArray(a.look).lerp(new THREE.Vector3(...b.look),u).toArray()};
+}
+// Authored route stops that sit on a named landmark, so choosing that landmark also moves the resume point there.
 const checkpoints=[];
 for(let i=0;i<route.length;i++){const p=route[i],place=placeOrder.find(id=>Math.hypot(p.x-places[id].position[0],p.z-places[id].position[2])<.01);if(place)checkpoints.push({index:i,place,t:p.t});}
 function guided(dt){
-  tourTime=Math.min(route.at(-1).t,tourTime+dt);while(resumeStop<checkpoints.length-1&&tourTime>=checkpoints[resumeStop+1].t)resumeStop++;let i=0;while(i<route.length-2&&tourTime>route[i+1].t)i++;
-  const a=route[i],b=route[i+1],u=THREE.MathUtils.smoothstep(tourTime,a.t,b.t);
-  camera.position.set(THREE.MathUtils.lerp(a.x,b.x,u),1.72,THREE.MathUtils.lerp(a.z,b.z,u));
-  tmpLook.fromArray(a.look).lerp(new THREE.Vector3(...b.look),u);camera.lookAt(tmpLook);yaw=targetYaw=camera.rotation.y;pitch=targetPitch=camera.rotation.x;
+  tourTime=Math.min(route.at(-1).t,tourTime+dt);
+  const point=sampleRoute(tourTime);
+  camera.position.set(point.x,1.72,point.z);
+  camera.lookAt(...point.look);yaw=targetYaw=camera.rotation.y;pitch=targetPitch=camera.rotation.x;
   if(tourTime>=route.at(-1).t&&!tourDone){tourDone=true;mode='walk';syncUI();announce('You have reached the dormitory arcade. Keep exploring or choose another landmark.',true);}
 }
 function updatePlace(){const p=camera.position;let nearest=activePlace,best=Infinity;for(const [id,s]of Object.entries(places)){const d=Math.hypot(p.x-s.position[0],p.z-s.position[2]);if(d<best){nearest=id;best=d;}}locationUI(nearest);}
@@ -168,7 +175,7 @@ async function init(){
   }catch(error){console.error('Campus visit could not initialize',error);$('loading').hidden=true;$('load-error').hidden=false;$('start-tour').hidden=true;$('start-walk').hidden=true;}
 }
 function installDiagnostics(){
-  window.__THREE_GAME_DIAGNOSTICS__={renderer:renderer.info,get state(){return{ready,mode,paused,activePlace,audio:{on:audio.on,contextState:audio.context?.state??"closed",sources:audio.sources.size+(audio.wind?1:0),gain:audio.master?.gain.value??0},position:camera.position.toArray(),tourTime,resumeStop,quality,world:world.diagnostics||null,frameTimeMs:frameMs.length?frameMs.reduce((a,b)=>a+b,0)/frameMs.length:null,physics:{engine:'custom bounded walk',timestep:'substeps <= 16ms',ccdBodies:0}};}};
+  window.__THREE_GAME_DIAGNOSTICS__={renderer:renderer.info,get state(){return{ready,mode,paused,activePlace,audio:{on:audio.on,contextState:audio.context?.state??"closed",sources:audio.sources.size+(audio.wind?1:0),gain:audio.master?.gain.value??0},position:camera.position.toArray(),tourTime,quality,world:world.diagnostics||null,frameTimeMs:frameMs.length?frameMs.reduce((a,b)=>a+b,0)/frameMs.length:null,physics:{engine:'custom bounded walk',timestep:'substeps <= 16ms',ccdBodies:0}};}};
   window.__THREE_GAME_TEST_HOOKS__={
     async setState(name){if(!['welcome',...placeOrder,'settings'].includes(name))throw new Error(`Unknown state: ${name}`);dialogs.forEach(d=>d.close());clearInput();shotPaused=false;paused=false;elapsed=0;if(name==='welcome'){mode='welcome';overview();syncUI();}else{await visit(name==='settings'?'plaza':name,{instant:true});if(name==='settings')openDialog('settings-dialog');}$('visit-status').hidden=true;world.update(.1,0,camera.position);renderer.info.reset();renderer.render(scene,camera);return{state:name};},
     setPausedForScreenshot(value){shotPaused=Boolean(value);clearInput();},setReducedMotion(value){reduced=Boolean(value);$('reduced-motion').checked=reduced;syncUI();}
